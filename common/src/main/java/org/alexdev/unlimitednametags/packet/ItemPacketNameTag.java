@@ -29,7 +29,7 @@ class ItemPacketNameTag extends PacketNameTag {
     @Override
     protected @NotNull Function<User, WrapperEntity> buildBaseSupplier() {
         return user -> {
-            final WrapperEntity w = new WrapperEntity(getEntityId(), getEntityIdUuid(), EntityTypes.ITEM_DISPLAY);
+            final WrapperEntity w = SkipUnchangedMetadata.createEntity(getEntityId(), getEntityIdUuid(), EntityTypes.ITEM_DISPLAY);
             w.getEntityMeta().setNotifyAboutChanges(false);
             return w;
         };

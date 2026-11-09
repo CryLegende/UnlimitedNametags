@@ -27,7 +27,7 @@ class BlockPacketNameTag extends PacketNameTag {
     @Override
     protected @NotNull Function<User, WrapperEntity> buildBaseSupplier() {
         return user -> {
-            final WrapperEntity w = new WrapperEntity(getEntityId(), getEntityIdUuid(), EntityTypes.BLOCK_DISPLAY);
+            final WrapperEntity w = SkipUnchangedMetadata.createEntity(getEntityId(), getEntityIdUuid(), EntityTypes.BLOCK_DISPLAY);
             w.getEntityMeta().setNotifyAboutChanges(false);
             return w;
         };

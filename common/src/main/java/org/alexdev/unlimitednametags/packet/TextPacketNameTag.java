@@ -43,7 +43,7 @@ class TextPacketNameTag extends PacketNameTag {
     @Override
     protected @NotNull Function<User, WrapperEntity> buildBaseSupplier() {
         return user -> {
-            final WrapperEntity w = new WrapperEntity(getEntityId(), getEntityIdUuid(), EntityTypes.TEXT_DISPLAY);
+            final WrapperEntity w = SkipUnchangedMetadata.createEntity(getEntityId(), getEntityIdUuid(), EntityTypes.TEXT_DISPLAY);
             final TextDisplayMeta meta = (TextDisplayMeta) w.getEntityMeta();
             meta.setLineWidth(1000);
             meta.setNotifyAboutChanges(false);
