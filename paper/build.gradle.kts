@@ -17,6 +17,7 @@ dependencies {
         exclude(group = "io.papermc.paper")
         exclude(group = "com.github.Tofaa2.EntityLib")
         exclude(group = "me.tofaa2")
+        exclude(group = "me.tofaa.entitylib")
     }
     compileOnly(libs.placeholderapi)
     compileOnly(libs.miniplaceholdersApi)
