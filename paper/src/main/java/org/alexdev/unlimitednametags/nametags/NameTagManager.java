@@ -811,6 +811,13 @@ public class NameTagManager implements UntNametagManagerPaper {
             return;
         }
 
+        // No rows yet: create them through addPlayer, which skips blocked, invisible and spectator players.
+        // updateLineCount would spawn them to every nearby player without those checks.
+        if (!hasNametagRows(player.getUniqueId())) {
+            addPlayer(player, false);
+            return;
+        }
+
         updateLineCount(player, nametag);
 
         final CopyOnWriteArrayList<PacketNameTag> playerTags = nameTags.get(player.getUniqueId());
@@ -1370,6 +1377,13 @@ public class NameTagManager implements UntNametagManagerPaper {
     }
 
     private void showToTrackedPlayers(@NotNull Player player, @NotNull Collection<Player> tracked, boolean ensureCreated, boolean includeOwner) {
+        // The invisibility REMOVED event shows the nametag again once the effect is gone.
+        if (player.hasPotionEffect(PotionEffectType.INVISIBILITY)) {
+            if (debug) {
+                plugin.getLogger().info("Player " + player.getName() + " has invisibility potion effect, not showing nametag");
+            }
+            return;
+        }
         final CopyOnWriteArrayList<PacketNameTag> tagList = nameTags.get(player.getUniqueId());
         final List<PacketNameTag> packetNameTags = tagList == null ? List.of() : tagList;
         for (PacketNameTag packetNameTag : packetNameTags) {
