@@ -7,12 +7,15 @@ import com.github.retrooper.packetevents.event.PacketSendEvent;
 import com.github.retrooper.packetevents.protocol.entity.data.EntityData;
 import com.github.retrooper.packetevents.protocol.packettype.PacketType;
 import com.github.retrooper.packetevents.protocol.player.ClientVersion;
+import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.util.Vector3f;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientEntityAction;
 import com.github.retrooper.packetevents.wrapper.play.client.WrapperPlayClientPlayerInput;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerCamera;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityMetadata;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSetPassengers;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerSpawnEntity;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerUpdateAttributes;
 import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerTeams;
 import com.google.common.collect.Maps;
 import org.alexdev.unlimitednametags.UnlimitedNameTags;
@@ -52,6 +55,60 @@ public class PacketEventsListener extends PacketListenerAbstract {
             handleMetaData(event);
         } else if (event.getPacketType() == PacketType.Play.Server.CAMERA) {
             handleCamera(event);
+        } else if (event.getPacketType() == PacketType.Play.Server.SPAWN_ENTITY) {
+            handleSpawnEntity(event);
+        } else if (event.getPacketType() == PacketType.Play.Server.UPDATE_ATTRIBUTES) {
+            handleUpdateAttributes(event);
+        }
+    }
+
+    /**
+     * A player with a nametag just got spawned for a viewer: mount the rows right behind that packet. The rows were
+     * spawned for the viewer just before (tracking event), the delayed passengers packet stays as a fallback.
+     */
+    private void handleSpawnEntity(@NotNull PacketSendEvent event) {
+        if (!(event.getPlayer() instanceof Player viewer)) {
+            return;
+        }
+        final WrapperPlayServerSpawnEntity packet = new WrapperPlayServerSpawnEntity(event);
+        final Optional<? extends Player> owner = plugin.getPlayerListener().getPlayerFromEntityId(packet.getEntityId());
+        if (owner.isEmpty() || owner.get().equals(viewer)
+                || !plugin.getNametagManager().hasNametagRows(owner.get().getUniqueId())) {
+            return;
+        }
+        final User user = event.getUser();
+        final Player ownerPlayer = owner.get();
+        event.getTasksAfterSend().add(() -> plugin.getNametagManager().mountAfterOwnerSpawn(user, viewer, ownerPlayer));
+    }
+
+    /**
+     * The server sends a player's scale attribute to them and to everyone tracking them: resize and lift the
+     * nametag right behind it. Only the owner's own copy triggers it (one update per change).
+     */
+    private void handleUpdateAttributes(@NotNull PacketSendEvent event) {
+        if (!(event.getPlayer() instanceof Player receiver)
+                || !plugin.getNametagManager().hasNametagRows(receiver.getUniqueId())) {
+            return;
+        }
+        boolean scale = false;
+        try {
+            final WrapperPlayServerUpdateAttributes packet = new WrapperPlayServerUpdateAttributes(event);
+            if (packet.getEntityId() != receiver.getEntityId()) {
+                return;
+            }
+            for (final WrapperPlayServerUpdateAttributes.Property property : packet.getProperties()) {
+                final String key = property.getKey();
+                if (key != null && key.endsWith("scale")) {
+                    scale = true;
+                    break;
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Unreadable attribute packet: the next refresh re-reads the scale anyway.
+            return;
+        }
+        if (scale) {
+            event.getTasksAfterSend().add(() -> plugin.getNametagManager().applyOwnerScaleNow(receiver));
         }
     }
 
@@ -94,8 +151,14 @@ public class PacketEventsListener extends PacketListenerAbstract {
 
 
         switch (packet.getAction()) {
-            case START_SNEAKING -> plugin.getNametagManager().updateSneaking(player.get(), true);
-            case STOP_SNEAKING -> plugin.getNametagManager().updateSneaking(player.get(), false);
+            case START_SNEAKING -> {
+                plugin.getNametagManager().predictSneakPose(player.get(), true);
+                plugin.getNametagManager().updateSneaking(player.get(), true);
+            }
+            case STOP_SNEAKING -> {
+                plugin.getNametagManager().predictSneakPose(player.get(), false);
+                plugin.getNametagManager().updateSneaking(player.get(), false);
+            }
             case START_FLYING_WITH_ELYTRA -> plugin.getPlayerListener().logicElytra(player.get());
         }
     }
@@ -107,6 +170,9 @@ public class PacketEventsListener extends PacketListenerAbstract {
 
         final WrapperPlayClientPlayerInput packet = new WrapperPlayClientPlayerInput(event);
         final Collection<PaperNametagRow> packetNameTags = plugin.getNametagManager().getPacketDisplays(player);
+        if (!packetNameTags.isEmpty()) {
+            plugin.getNametagManager().predictSneakPose(player, packet.isShift());
+        }
 
         boolean updateSneaking = packetNameTags.stream()
                 .anyMatch(packetNameTag -> packet.isShift() != packetNameTag.isSneaking());

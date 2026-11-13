@@ -45,10 +45,11 @@ public interface NametagPlatformBridge {
     boolean isEffectiveShowOwnNametag(@NotNull UUID ownerId);
 
     /**
-     * Anchor location with pitch 0, yaw -180, and Y raised by {@code 1.8 * displayScale}.
+     * Anchor location with pitch 0, yaw -180, and Y raised to the top of the owner's hitbox (where the client puts
+     * the display once it rides the owner); {@code ownerScale} is the owner's scale attribute.
      */
     @Nullable
-    Location offsetDisplayLocation(float displayScale);
+    Location offsetDisplayLocation(float ownerScale);
 
     boolean viewerLacksTextDisplaySupport(@NotNull UUID viewerId);
 

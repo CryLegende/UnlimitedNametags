@@ -85,6 +85,25 @@ public class PacketManager {
         });
     }
 
+    /**
+     * Same packet as {@link #sendPassengersPacket}, written on the calling thread. Used from the viewer's netty thread
+     * right after the owner's spawn packet, so the client receives the mount just behind the owner it refers to.
+     */
+    public void sendPassengersPacketNow(@NotNull User player, @NotNull Player owner, @NotNull Collection<? extends NametagPassengerSource> packetNameTags) {
+        if (packetNameTags.isEmpty() || player.getChannel() == null) {
+            return;
+        }
+        final LinkedHashSet<Integer> ids = new LinkedHashSet<>();
+        for (final NametagPassengerSource tag : packetNameTags) {
+            ids.add(tag.displayEntityId());
+        }
+        final LinkedHashSet<Integer> passengers = new LinkedHashSet<>(this.passengers.get(owner.getUniqueId()));
+        passengers.removeAll(ids);
+        passengers.addAll(ids);
+        final int[] passengersArray = passengers.stream().mapToInt(Integer::intValue).toArray();
+        player.sendPacketSilently(new WrapperPlayServerSetPassengers(owner.getEntityId(), passengersArray));
+    }
+
     public void removePassenger(@NotNull Player player, int passenger) {
         this.passengers.remove(player.getUniqueId(), passenger);
     }

@@ -174,7 +174,7 @@ public final class BukkitNametagPlatform implements NametagPlatformBridge {
     }
 
     @Override
-    public @Nullable Location offsetDisplayLocation(float displayScale) {
+    public @Nullable Location offsetDisplayLocation(float ownerScale) {
         final Player player = plugin.getPlayerListener().getPlayer(ownerId);
         if (player == null) {
             return null;
@@ -182,7 +182,9 @@ public final class BukkitNametagPlatform implements NametagPlatformBridge {
         final org.bukkit.Location bukkit = player.getLocation();
         bukkit.setPitch(0);
         bukkit.setYaw(-180);
-        bukkit.setY(bukkit.getY() + 1.8 * displayScale);
+        // Where the client puts the passenger once mounted: top of the current hitbox (pose and scale included),
+        // so the display does not jump when the passengers packet lands.
+        bukkit.setY(bukkit.getY() + player.getHeight());
         return SpigotConversionUtil.fromBukkitLocation(bukkit);
     }
 

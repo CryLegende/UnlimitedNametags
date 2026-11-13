@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Per-viewer text display state and updates for {@link TextPacketNameTag} only.
@@ -133,6 +134,25 @@ final class TextNametagSupport {
             final byte obscuredOpacityByte,
             final double maxDistanceSq,
             final boolean sneakEffective) {
+        final UUID ownerId = host.getOwnerId();
+        applyObscuredLineOfSightPresentation(featureEnabled, sneakOpacityByte, obscuredOpacityByte, sneakEffective,
+                viewerId -> {
+                    final double distSq = host.getPlatform().distanceSquaredSameWorld(ownerId, viewerId);
+                    return distSq >= 0 && distSq <= maxDistanceSq
+                            && !host.getPlatform().hasLineOfSight(viewerId, ownerId);
+                });
+    }
+
+    /**
+     * Same as above with the line-of-sight test supplied by the caller, so the rows of one owner share a single
+     * ray cast per viewer. {@code obscured} is only asked for viewers other than the owner, and only when not sneaking.
+     */
+    void applyObscuredLineOfSightPresentation(
+            final boolean featureEnabled,
+            final byte sneakOpacityByte,
+            final byte obscuredOpacityByte,
+            final boolean sneakEffective,
+            @NotNull final Predicate<UUID> obscured) {
         if (!featureEnabled) {
             return;
         }
@@ -150,13 +170,9 @@ final class TextNametagSupport {
 
             if (sneakEffective) {
                 opacity = sneakOpacityByte;
-            } else if (!viewerId.equals(ownerId)) {
-                final double distSq = host.getPlatform().distanceSquaredSameWorld(ownerId, viewerId);
-                if (distSq >= 0 && distSq <= maxDistanceSq
-                        && !host.getPlatform().hasLineOfSight(viewerId, ownerId)) {
-                    opacity = obscuredOpacityByte;
-                    seeThroughMeta = true;
-                }
+            } else if (!viewerId.equals(ownerId) && obscured.test(viewerId)) {
+                opacity = obscuredOpacityByte;
+                seeThroughMeta = true;
             }
 
             final ViewerTextSnap prev = obscuredPresentationByViewer.get(viewerId);

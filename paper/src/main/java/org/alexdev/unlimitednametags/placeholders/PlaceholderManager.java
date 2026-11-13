@@ -327,7 +327,9 @@ public class PlaceholderManager {
                 .map(line -> format(line, player))
                 .toList();
 
-        if (enableRelationalPlaceholders) {
+        // Per-viewer pass only when a line really holds a %rel_...% placeholder: otherwise every viewer gets the same
+        // component, and walking each line's component tree once per viewer on every refresh was pure waste.
+        if (enableRelationalPlaceholders && baseStrings.stream().anyMatch(line -> RELATIONAL_PATTERN.matcher(line).find())) {
             final Map<Player, Component> result = Maps.newHashMapWithExpectedSize(relationalPlayers.size());
             for (Player viewer : relationalPlayers) {
                 final List<Component> processedLines = baseComponents.stream()

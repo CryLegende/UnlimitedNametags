@@ -182,6 +182,13 @@ public class Settings {
         @Comment("Opacity applied to the nametag when a player sneaks (-128 to 127). -1 = fully opaque (255).")
         private int sneakOpacity = 70;
 
+        @Comment({
+                "Send a player's crouch / stand-up pose to nearby players as soon as the sneak key arrives, instead of",
+                "about two ticks later with the server's own update: body and nametag drop together, at once.",
+                "Only plain standing <-> crouching is predicted; a check two ticks later re-sends the real pose if needed."
+        })
+        private boolean instantSneakPose = true;
+
         @Comment("Whether to see the NameTag of a user only while pointing at them.")
         private boolean showWhileLooking = false;
 

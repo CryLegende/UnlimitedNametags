@@ -49,9 +49,15 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
     @Setter
     private boolean visible;
     private Settings.DisplayGroup displayGroup;
+    /** Display scale sent to clients: {@link #ownerScale} times the display group scale. */
     private float scale;
+    /**
+     * The owner's {@code minecraft:scale} attribute (1 = normal size). The client places a passenger at the top of the
+     * scaled hitbox, so every vertical offset of the layout (global yOffset, stack rows, helmet, animation) is expressed
+     * for a normal-size player and multiplied by this value when sent.
+     */
+    private float ownerScale = 1f;
     private float offset;
-    private float increasedOffset;
     private volatile boolean removed;
     @Setter
     private boolean sneaking;
@@ -112,11 +118,19 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
         this.lastUpdate = System.currentTimeMillis();
         this.animationLeftQuat = new Quaternion4f(0f, 0f, 0f, 1f);
         this.animationEpochMs = System.currentTimeMillis();
-        setScale(runtime.scaledDisplayScale(ownerId, displayGroup.effectiveScale()));
+        // Rows created outside the full load path (new row on refresh, display type swap) never get resetOffset:
+        // start from the configured global offset instead of 0 (0 put the bottom line inside the player's head).
+        this.offset = runtime.settings().getBehavior().getYOffset();
+        this.ownerScale = runtime.scaledDisplayScale(ownerId, 1f);
+        this.scale = ownerScale * displayGroup.effectiveScale();
+        recomputeBaseTranslationY();
+        applyDisplayTransform();
     }
 
     public void setDisplayGroup(@NotNull Settings.DisplayGroup displayGroup) {
         this.displayGroup = displayGroup;
+        this.scale = ownerScale * displayGroup.effectiveScale();
+        recomputeBaseTranslationY();
         resetDisplayAnimationState();
         resetGlowAnimationState();
         applyGlowNow(0L);
@@ -268,22 +282,21 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
         return displayGroup.effectiveScale();
     }
 
+    /**
+     * Re-reads the owner's scale attribute and the display group scale; re-sends the layout when either changed.
+     *
+     * @return {@code true} if the layout changed
+     */
     public boolean checkScale() {
-        final float resolved = platform.resolveDisplayScale(ownerId, getDefaultScale());
-        final double diff = Math.abs(resolved - scale);
-        if (diff <= 0.01 && diff >= 0) {
+        final float resolvedOwner = platform.resolveDisplayScale(ownerId, 1f);
+        final float resolved = resolvedOwner * getDefaultScale();
+        if (Math.abs(resolvedOwner - ownerScale) < 1e-4f && Math.abs(resolved - scale) < 1e-4f) {
             return false;
         }
-
-        setScale(resolved);
-        return true;
-    }
-
-    private void setScale(float scale) {
-        this.scale = scale;
-        this.increasedOffset = scale > 1 ? scale / 5 : 0;
-        recomputeBaseTranslationY();
+        this.ownerScale = resolvedOwner;
+        this.scale = resolved;
         applyDisplayTransform();
+        return true;
     }
 
     public void setBillboard(@NotNull AbstractDisplayMeta.BillboardConstraints billboard) {
@@ -363,10 +376,11 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
         applyDisplayTransform();
     }
 
+    /** Base translation for a normal-size owner; {@link #applyDisplayTransform} multiplies it by {@link #ownerScale}. */
     private void recomputeBaseTranslationY() {
         final float rowOffset = compactStackLayout ? compactStackYOffset : displayGroup.yOffset();
         final float helmetOffset = !compactStackLayout || compactStackHelmetOffset ? helmetExtraOffset : 0f;
-        this.baseTranslationY = offset + increasedOffset + rowOffset + helmetOffset;
+        this.baseTranslationY = offset + rowOffset + helmetOffset;
     }
 
     /**
@@ -389,8 +403,9 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
         if (removed) {
             return;
         }
-        final float tx = animationTx;
-        final float tz = animationTz;
+        final float os = ownerScale;
+        final float tx = animationTx * os;
+        final float tz = animationTz * os;
         final Quaternion4f lq = new Quaternion4f(
                 animationLeftQuat.getX(), animationLeftQuat.getY(), animationLeftQuat.getZ(), animationLeftQuat.getW());
         final float sc = scale * animationScaleMul;
@@ -401,7 +416,7 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
                     continue;
                 }
                 final float baseY = perViewerStackBaseY.getOrDefault(viewerId, baseTranslationY);
-                final float y = baseY + animationTy;
+                final float y = (baseY + animationTy) * os;
                 modifyEntity(user, w -> {
                     final AbstractDisplayMeta meta = (AbstractDisplayMeta) w.getEntityMeta();
                     meta.setTranslation(new Vector3f(tx, y, tz));
@@ -410,7 +425,7 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
                 });
             }
         } else {
-            final float y = baseTranslationY + animationTy;
+            final float y = (baseTranslationY + animationTy) * os;
             modifyAbstractAll(meta -> {
                 meta.setTranslation(new Vector3f(tx, y, tz));
                 meta.setLeftRotation(lq);
@@ -842,7 +857,7 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
 
     @Nullable
     public Location getOffsetPeLocation() {
-        return platform.offsetDisplayLocation(scale);
+        return platform.offsetDisplayLocation(ownerScale);
     }
 
     public void hideFromViewer(@NotNull UUID viewerId) {
@@ -975,6 +990,23 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
         }
     }
 
+    /**
+     * Same as {@link #applyObscuredLineOfSightPresentation(boolean, byte, byte, double, boolean)} with a caller-supplied
+     * "viewer has no line of sight to the owner" test, shared by all rows of the owner.
+     */
+    public void applyObscuredLineOfSightPresentation(
+            final boolean featureEnabled,
+            final byte sneakOpacityByte,
+            final byte obscuredOpacityByte,
+            final boolean sneakEffective,
+            @NotNull final java.util.function.Predicate<UUID> obscured) {
+        final TextNametagSupport t = textNametag();
+        if (t != null) {
+            t.applyObscuredLineOfSightPresentation(featureEnabled, sneakOpacityByte, obscuredOpacityByte, sneakEffective,
+                    obscured);
+        }
+    }
+
     public void setTextOpacity(final byte b) {
         final TextNametagSupport t = textNametag();
         if (t != null) {
@@ -1026,7 +1058,7 @@ public abstract class PacketNameTag implements AnimationPoseTarget, NametagPasse
         properties.put("yOffset", String.valueOf(offset));
         properties.put("displayGroupYOffset", String.valueOf(displayGroup.yOffset()));
         properties.put("scale", String.valueOf(meta.getScale()));
-        properties.put("increasedOffset", String.valueOf(increasedOffset));
+        properties.put("ownerScale", String.valueOf(ownerScale));
         properties.put("helmetExtraOffset", String.valueOf(helmetExtraOffset));
         properties.put("viewRange", String.valueOf(meta.getViewRange()));
         properties.put("glowing", String.valueOf(meta.isGlowing()));

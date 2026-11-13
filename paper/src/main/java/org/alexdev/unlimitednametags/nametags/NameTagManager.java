@@ -3,7 +3,11 @@ package org.alexdev.unlimitednametags.nametags;
 import com.github.Anon8281.universalScheduler.scheduling.tasks.MyScheduledTask;
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.manager.server.ServerVersion;
+import com.github.retrooper.packetevents.protocol.entity.data.EntityData;
+import com.github.retrooper.packetevents.protocol.entity.data.EntityDataTypes;
+import com.github.retrooper.packetevents.protocol.entity.pose.EntityPose;
 import com.github.retrooper.packetevents.protocol.player.User;
+import com.github.retrooper.packetevents.wrapper.play.server.WrapperPlayServerEntityMetadata;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -35,6 +39,7 @@ import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Pose;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.util.Vector;
 import org.jetbrains.annotations.NotNull;
@@ -47,6 +52,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 @Getter
@@ -83,6 +89,12 @@ public class NameTagManager implements UntNametagManagerPaper {
     private boolean debug = false;
     private volatile boolean distanceRefreshCullingEnabled = true;
     private final Attribute scaleAttribute;
+    /** Entity data index of the pose (base Entity data, unchanged since 1.14). */
+    private static final int POSE_DATA_INDEX = 6;
+    /** Last sneak key state seen per player, so a pose is only predicted on an actual key change. */
+    private final Map<UUID, Boolean> lastSneakKey = new ConcurrentHashMap<>();
+    /** Last pose prediction per player; only the newest one gets its two-tick check. */
+    private final Map<UUID, Long> poseSequence = new ConcurrentHashMap<>();
 
     private record ResolvedDisplayRow(
             int index,
@@ -177,15 +189,13 @@ public class NameTagManager implements UntNametagManagerPaper {
                 20, 20 * 5L);
         tasks.add(passengers);
 
-        // Scale task
+        // Scale: applied the moment the server sends the attribute (PacketEventsListener -> applyOwnerScaleNow), in step
+        // with the player's own resize. This slow pass is only a safety net; reading the attribute every refresh made
+        // the nametag resize up to a tick before the player did.
         if (isScalePresent()) {
             final MyScheduledTask scale = plugin.getTaskScheduler()
                     .runTaskTimerAsynchronously(() -> nameTags.values()
-                            .forEach(tags -> tags.forEach(tag -> {
-                                if (tag.checkScale()) {
-                                    tag.refresh();
-                                }
-                            })), 20, 10);
+                            .forEach(tags -> tags.forEach(PacketNameTag::checkScale)), 20, 20);
             tasks.add(scale);
         }
 
@@ -294,15 +304,19 @@ public class NameTagManager implements UntNametagManagerPaper {
         if (mode == Settings.ThroughWallMode.OBSCURED) {
             final byte sneakB = clampMcTextOpacity(s.getVisibility().getSneakOpacity());
             final byte obscB = clampMcTextOpacity(s.getVisibility().getThroughWallSettings().getOpacity());
-            for (final CopyOnWriteArrayList<PacketNameTag> tags : nameTags.values()) {
-                for (final PacketNameTag tag : tags) {
+            for (final Map.Entry<UUID, CopyOnWriteArrayList<PacketNameTag>> entry : nameTags.entrySet()) {
+                final Player owner = plugin.getPlayerListener().getPlayer(entry.getKey());
+                if (owner == null) {
+                    continue;
+                }
+                final boolean shiftBlocked = shiftSystemBlocked.getOrDefault(owner.getUniqueId(), false);
+                final Predicate<UUID> obscured = obscuredViewerTest(owner, maxSq);
+                for (final PacketNameTag tag : entry.getValue()) {
                     if (!tag.isTextDisplay()) {
                         continue;
                     }
-                    final Player owner = paperRow(tag).getOwner();
-                    final boolean shiftBlocked = shiftSystemBlocked.getOrDefault(owner.getUniqueId(), false);
                     final boolean sneakEff = tag.isSneaking() && !shiftBlocked;
-                    tag.applyObscuredLineOfSightPresentation(true, sneakB, obscB, maxSq, sneakEff);
+                    tag.applyObscuredLineOfSightPresentation(true, sneakB, obscB, sneakEff, obscured);
                 }
             }
         } else if (mode == Settings.ThroughWallMode.HIDE) {
@@ -335,6 +349,23 @@ public class NameTagManager implements UntNametagManagerPaper {
                 }
             }
         }
+    }
+
+    /**
+     * "Viewer has no line of sight to the owner within {@code maxSq}" for every row of one owner: each viewer is ray
+     * cast once per pass instead of once per row.
+     */
+    @NotNull
+    private Predicate<UUID> obscuredViewerTest(@NotNull Player owner, final double maxSq) {
+        final Map<UUID, Boolean> memo = new HashMap<>();
+        final Location ownerLocation = owner.getLocation();
+        return viewerId -> memo.computeIfAbsent(viewerId, id -> {
+            final Player viewer = plugin.getPlayerListener().getPlayer(id);
+            if (viewer == null || viewer.getWorld() != owner.getWorld()) {
+                return false;
+            }
+            return viewer.getLocation().distanceSquared(ownerLocation) <= maxSq && !viewer.hasLineOfSight(owner);
+        });
     }
 
     private static byte clampMcTextOpacity(final int raw) {
@@ -421,6 +452,8 @@ public class NameTagManager implements UntNametagManagerPaper {
     }
 
     public void clearCache(@NotNull UUID uuid) {
+        lastSneakKey.remove(uuid);
+        poseSequence.remove(uuid);
         blocked.remove(uuid);
         creating.remove(uuid);
         hideNametags.remove(uuid);
@@ -854,6 +887,9 @@ public class NameTagManager implements UntNametagManagerPaper {
             final List<ResolvedDisplayRow> rows = collectResolvedRows(futures);
             final float helmetExtraOffset = plugin.getPlaceholderManager().computeHelmetExtraOffset(player);
             runDeferredDisplayBatch(rows, force, () -> {
+                if (force) {
+                    rows.forEach(row -> row.display().checkScale());
+                }
                 rows.forEach(row -> editDisplay(player, row.index(), row.display(), row.components(),
                         row.displayGroup(), force, helmetExtraOffset));
                 applyDisplayGroupStackLayout(player, rows, helmetExtraOffset);
@@ -917,16 +953,10 @@ public class NameTagManager implements UntNametagManagerPaper {
         applyRowGlow(owner, groupIndex, packetNameTag, displayGroup);
         if (displayGroup.resolvedDisplayType() != NametagDisplayType.TEXT) {
             packetNameTag.syncVisualFromGroup(displayGroup);
-            if (force && isScalePresent()) {
-                packetNameTag.checkScale();
-            }
             if (force) {
                 packetNameTag.updateYOOffset();
             }
             return;
-        }
-        if (force && isScalePresent()) {
-            packetNameTag.checkScale();
         }
         if (force) {
             packetNameTag.updateYOOffset();
@@ -967,7 +997,8 @@ public class NameTagManager implements UntNametagManagerPaper {
         if (force || meta.getBackgroundColor() != backgroundColor) {
             meta.setBackgroundColor(backgroundColor);
         }
-        if (force || meta.isSeeThrough() != seeThrough) {
+        // OBSCURED: see-through is set per viewer by the line-of-sight pass (true behind a wall); leave it alone here.
+        if (throughWallMode != Settings.ThroughWallMode.OBSCURED && (force || meta.isSeeThrough() != seeThrough)) {
             meta.setSeeThrough(seeThrough);
         }
     }
@@ -1170,8 +1201,6 @@ public class NameTagManager implements UntNametagManagerPaper {
             float nextYOffset = 0f;
             for (int i = 0; i < rows.size(); i++) {
                 final ResolvedDisplayRow row = rows.get(i);
-                final PacketNameTag display = row.display();
-                final float inc = stackIncreasedOffset(display);
                 final boolean visible = isCompactStackVisibleForViewer(player, viewer, row);
                 final float rowCompactY;
                 final boolean helmetForRow;
@@ -1183,7 +1212,7 @@ public class NameTagManager implements UntNametagManagerPaper {
                     nextYOffset = rowCompactY + estimateDisplayGroupHeightForViewer(player, viewer, row, lineHeight);
                     hasVisibleRow = true;
                 }
-                final float baseY = globalYOffset + inc + rowCompactY + (helmetForRow ? helmetExtraOffset : 0f);
+                final float baseY = globalYOffset + rowCompactY + (helmetForRow ? helmetExtraOffset : 0f);
                 yByRow.get(i).put(viewer.getUniqueId(), baseY);
             }
         }
@@ -1191,11 +1220,6 @@ public class NameTagManager implements UntNametagManagerPaper {
         for (int i = 0; i < rows.size(); i++) {
             rows.get(i).display().setPerViewerStackBaseY(yByRow.get(i));
         }
-    }
-
-    private static float stackIncreasedOffset(@NotNull PacketNameTag display) {
-        final float sc = display.getScale();
-        return sc > 1f ? sc / 5f : 0f;
     }
 
     private boolean isCompactStackVisibleForViewer(
@@ -1215,7 +1239,8 @@ public class NameTagManager implements UntNametagManagerPaper {
 
     private float estimateDisplayGroupHeightForViewer(
             @NotNull Player owner, @NotNull Player viewer, @NotNull ResolvedDisplayRow row, float lineHeight) {
-        final float scale = row.display().getScale();
+        // Normal-size units: the owner's scale is applied by the display itself.
+        final float scale = row.displayGroup().effectiveScale();
         return switch (row.displayGroup().resolvedDisplayType()) {
             case TEXT -> Math.max(1, estimateTextLineCount(row.components().get(viewer))) * lineHeight * scale;
             case ITEM -> COMPACT_ITEM_DISPLAY_HEIGHT_BLOCKS * scale;
@@ -1261,7 +1286,8 @@ public class NameTagManager implements UntNametagManagerPaper {
     }
 
     private float estimateDisplayGroupHeight(@NotNull ResolvedDisplayRow row, float lineHeight) {
-        final float scale = row.display().getScale();
+        // Normal-size units: the owner's scale is applied by the display itself.
+        final float scale = row.displayGroup().effectiveScale();
         return switch (row.displayGroup().resolvedDisplayType()) {
             case TEXT -> Math.max(1, estimateTextLineCount(row.ownerComponent())) * lineHeight * scale;
             case ITEM -> COMPACT_ITEM_DISPLAY_HEIGHT_BLOCKS * scale;
@@ -1437,18 +1463,156 @@ public class NameTagManager implements UntNametagManagerPaper {
         final byte obscB = clampMcTextOpacity(settings.getVisibility().getThroughWallSettings().getOpacity());
         final double maxSq = settings.getVisibility().getThroughWallSettings().getMaxDistance() * settings.getVisibility().getThroughWallSettings().getMaxDistance();
 
+        // Standing up in OBSCURED mode: one ray cast per viewer for all rows (none when crouching).
+        final Predicate<UUID> obscured = isObscured && !sneaking ? obscuredViewerTest(player, maxSq) : id -> false;
         for (PaperNametagRow row : getPacketDisplays(player)) {
             final PacketNameTag packetNameTag = (PacketNameTag) row;
             packetNameTag.setSneaking(sneaking);
             if (packetNameTag.isTextDisplay()) {
                 if (isObscured) {
-                    packetNameTag.applyObscuredLineOfSightPresentation(true, sneakB, obscB, maxSq, sneaking);
+                    packetNameTag.applyObscuredLineOfSightPresentation(true, sneakB, obscB, sneaking, obscured);
                 } else {
                     applyTextVisualState(packetNameTag, packetNameTag.getDisplayGroup(), false);
                     packetNameTag.setTextOpacity(sneaking ? sneakB : (byte) -1);
                 }
             }
             packetNameTag.refresh();
+        }
+    }
+
+    /**
+     * Called from the netty thread when the sneak key changes. Sends the owner's crouching (or standing) pose to the
+     * players tracking them right away: the server only broadcasts it about two ticks later, so the body crouched
+     * after the nametag had already dimmed. The nametag rides the player, so it drops with the body, together with
+     * the opacity change sent by {@link #updateSneaking}.
+     * <p>
+     * Only the plain STANDING &lt;-&gt; CROUCHING change the server is about to make is predicted (not flying, gliding,
+     * swimming, riding...). Two ticks later, on the main thread, the real pose is re-sent if it differs: the server
+     * broadcasts nothing when its own pose did not change (sneak event cancelled, ceiling when standing up).
+     */
+    public void predictSneakPose(@NotNull Player player, boolean sneaking) {
+        if (!plugin.getConfigManager().getSettings().getVisibility().isInstantSneakPose()) {
+            return;
+        }
+        final UUID uuid = player.getUniqueId();
+        final Boolean previous = lastSneakKey.put(uuid, sneaking);
+        if (previous != null && previous == sneaking) {
+            return;
+        }
+        final Pose current = player.getPose();
+        if (sneaking ? current != Pose.STANDING : current != Pose.SNEAKING) {
+            return;
+        }
+        if (player.isFlying() || player.isGliding() || player.isSwimming() || player.isSleeping()
+                || player.isRiptiding() || player.isInsideVehicle() || player.isDead()
+                || player.getGameMode() == GameMode.SPECTATOR) {
+            return;
+        }
+        if (!sneaking && !hasHeadroomToStand(player)) {
+            return;
+        }
+        final List<Player> viewers = plugin.getTrackerManager().getWhoTracks(player);
+        if (viewers.isEmpty()) {
+            return;
+        }
+        final Pose predicted = sneaking ? Pose.SNEAKING : Pose.STANDING;
+        sendPose(player, predicted, viewers);
+        final long seq = poseSequence.merge(uuid, 1L, Long::sum);
+        plugin.getTaskScheduler().runTaskLater(player, () -> verifyPredictedPose(player, predicted, seq), 2L);
+    }
+
+    private void verifyPredictedPose(@NotNull Player player, @NotNull Pose predicted, long seq) {
+        if (!player.isOnline() || poseSequence.getOrDefault(player.getUniqueId(), 0L) != seq) {
+            return;
+        }
+        final Pose actual = player.getPose();
+        if (actual != predicted) {
+            sendPose(player, actual, plugin.getTrackerManager().getWhoTracks(player));
+        }
+    }
+
+    /** Standing hitbox (crouching box raised to 1.8 / 1.5 of its height) clear of solid blocks. */
+    private boolean hasHeadroomToStand(@NotNull Player player) {
+        final org.bukkit.util.BoundingBox box = player.getBoundingBox();
+        final double standTop = box.getMinY() + box.getHeight() * (1.8 / 1.5);
+        final World world = player.getWorld();
+        final int fromY = (int) Math.floor(box.getMaxY());
+        final int toY = (int) Math.floor(standTop - 1.0e-4);
+        final int[] xs = {(int) Math.floor(box.getMinX() + 1.0e-4), (int) Math.floor(box.getMaxX() - 1.0e-4)};
+        final int[] zs = {(int) Math.floor(box.getMinZ() + 1.0e-4), (int) Math.floor(box.getMaxZ() - 1.0e-4)};
+        for (final int x : xs) {
+            for (final int z : zs) {
+                for (int y = fromY; y <= toY; y++) {
+                    if (!world.getBlockAt(x, y, z).isPassable()) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private void sendPose(@NotNull Player player, @NotNull Pose pose, @NotNull Collection<Player> viewers) {
+        final EntityPose packetPose = switch (pose) {
+            case STANDING -> EntityPose.STANDING;
+            case SNEAKING -> EntityPose.CROUCHING;
+            default -> {
+                try {
+                    yield EntityPose.valueOf(pose.name());
+                } catch (IllegalArgumentException e) {
+                    yield null;
+                }
+            }
+        };
+        if (packetPose == null) {
+            return;
+        }
+        final WrapperPlayServerEntityMetadata packet = new WrapperPlayServerEntityMetadata(player.getEntityId(),
+                List.of(new EntityData<>(POSE_DATA_INDEX, EntityDataTypes.ENTITY_POSE, packetPose)));
+        for (final Player viewer : viewers) {
+            if (viewer.equals(player)) {
+                continue;
+            }
+            final User user = PacketEvents.getAPI().getPlayerManager().getUser(viewer);
+            if (user != null && user.getChannel() != null) {
+                user.sendPacket(packet);
+            }
+        }
+    }
+
+    /**
+     * Applies a new {@code minecraft:scale} the moment the server sends it (PacketEventsListener, after the attribute
+     * packet): size and height of every row change in the same frame as the player, without waiting for a refresh.
+     */
+    public void applyOwnerScaleNow(@NotNull Player owner) {
+        final CopyOnWriteArrayList<PacketNameTag> tags = nameTags.get(owner.getUniqueId());
+        if (tags == null) {
+            return;
+        }
+        for (final PacketNameTag tag : tags) {
+            tag.checkScale();
+        }
+    }
+
+    /**
+     * Called right after the owner's spawn packet went to {@code viewer}: mounts the nametag rows the viewer already
+     * has, so they ride the player from the first frame instead of floating ~3 ticks where they spawned.
+     */
+    public void mountAfterOwnerSpawn(@NotNull User viewerUser, @NotNull Player viewer, @NotNull Player owner) {
+        final CopyOnWriteArrayList<PacketNameTag> tags = nameTags.get(owner.getUniqueId());
+        if (tags == null || tags.isEmpty()) {
+            return;
+        }
+        final UUID viewerId = viewer.getUniqueId();
+        boolean shown = false;
+        for (final PacketNameTag tag : tags) {
+            if (tag.getViewers().contains(viewerId)) {
+                shown = true;
+                break;
+            }
+        }
+        if (shown) {
+            plugin.getPacketManager().sendPassengersPacketNow(viewerUser, owner, tags);
         }
     }
 
@@ -1918,7 +2082,7 @@ public class NameTagManager implements UntNametagManagerPaper {
         }
     }
 
-    private boolean hasNametagRows(@NotNull UUID playerId) {
+    public boolean hasNametagRows(@NotNull UUID playerId) {
         final CopyOnWriteArrayList<PacketNameTag> tags = nameTags.get(playerId);
         return tags != null && !tags.isEmpty();
     }
